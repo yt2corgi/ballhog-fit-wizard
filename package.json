@@ -1,0 +1,20 @@
+{
+  "name": "ballhog-fit-wizard",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node server/index.js",
+    "setup": "node scripts/setup.mjs",
+    "seed": "node scripts/seed-saved.mjs && node scripts/screen-saved.mjs",
+    "test": "node --test test/rules.test.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^1.6.0",
+    "@fontsource-variable/figtree": "^5.1.0",
+    "express": "^4.21.0",
+    "onnxruntime-node": "^1.20.0",
+    "sharp": "^0.33.5",
+    "zod": "^3.23.8"
+  }
+}
