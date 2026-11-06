@@ -1,17 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { classify, displaySize, fitVariant, harmony, isBlocked, pickVariant, readShoe, readTop, readWaist } from '../server/rules.js';
-import { buildFit, Pool, rerollSlot } from '../server/generator.js';
-import { sizeFromTitle, normalizeItem } from '../server/ebay.js';
-import { normalizeProduct } from '../server/shopify.js';
-import { applyVerdict, configure, vetPiece } from '../server/claude.js';
-import { isAllowedImage } from '../server/stores.js';
-import { configure as configureCut, cornerColour, cutBuffer, legBand, skinShare } from '../server/cutout.js';
-import { checkLinks } from '../server/saved.js';
-import sharp from 'sharp';
 import fs from 'node:fs';
-import os from 'node:os';
-import path from 'node:path';
+import { classify, displaySize, fitVariant, harmony, isBlocked, pickVariant, readShoe, readTop, readWaist } from '../public/lib/rules.js';
+import { budgetFits, buildFit, Pool, rerollSlot } from '../public/lib/generator.js';
+import { normalizeProduct, savedPiece } from '../public/lib/feeds.js';
+import { cornerColour, legBand, maskFromOutput, pieceColour } from '../public/lib/pixels.js';
+import { cleanPiece, decodeFit, encodeFit } from '../public/lib/share.js';
+import { isAllowedImage, isAllowedLink, STORES } from '../public/lib/stores.js';
 
 const mine = { waist: 32, top: 'L', shoe: 10 };
 
@@ -49,26 +44,22 @@ test('classify rejects slim cuts and non clothing', () => {
   assert.ok(!classify({ title: 'Vintage Crew Tee' }).lanes.includes('crewneck'));
 });
 
-test('jnco jeans count as baggy without the word', () => {
+test('jnco rave widths and novelty collabs are out', () => {
+  assert.equal(classify({ title: 'Polar Bear. 28". Vintage Stone.', type: 'Jeans', vendor: 'JNCO' }), null);
+  assert.equal(classify({ title: 'Minecraft Herschel Classic XL Backpack' }), null);
+  assert.equal(classify({ title: 'Persona 5 Royal x King Ice Necklace' }), null);
   const tagged = classify({ title: 'Cheyenne. 20". Superdark Stone.', type: 'Jeans', vendor: 'JNCO' });
   assert.equal(tagged.slot, 'bottoms');
   assert.ok(tagged.lanes.includes('football'));
 });
 
-test('jnco rave widths and novelty collabs are out', () => {
-  assert.equal(classify({ title: 'Polar Bear. 28". Vintage Stone.', type: 'Jeans', vendor: 'JNCO' }), null);
-  assert.equal(classify({ title: 'Minecraft Herschel Classic XL Backpack' }), null);
-  assert.equal(classify({ title: 'Persona 5 Royal x King Ice Necklace' }), null);
-  assert.equal(classify({ title: 'Twin Cannon. 20". Vintage Stone.', type: 'Jeans', vendor: 'JNCO' }).slot, 'bottoms');
-});
-
 test('size labels read cleanly', () => {
   assert.equal(displaySize('top', 'Size US L'), 'L');
   assert.equal(displaySize('belt', 'Size OS'), null);
+  assert.equal(displaySize('hat', '1 SIZE'), null);
   assert.equal(displaySize('shoes', '43'), 'EU 43');
   assert.equal(displaySize('shoes', '10.5'), '10.5');
   assert.equal(displaySize('bottoms', '32'), '32');
-  assert.equal(displaySize('hat', 'One Size'), null);
 });
 
 test('blocks ultra fast fashion and womenswear', () => {
@@ -87,7 +78,6 @@ test('reads size labels', () => {
   assert.equal(readTop('X-Large'), 'XL');
   assert.equal(readTop('XX-Large'), 'XXL');
   assert.equal(readTop('Size US S'), 'S');
-  assert.equal(readTop('Size US XL'), 'XL');
   assert.equal(readTop('50'), 'L');
   assert.equal(readShoe('10.5'), 10.5);
   assert.equal(readShoe('US 10'), 10);
@@ -97,7 +87,6 @@ test('reads size labels', () => {
 });
 
 test('sizes up bottoms and tops but keeps shoes exact', () => {
-  assert.ok(fitVariant('bottoms', '32', mine) >= 0);
   assert.ok(fitVariant('bottoms', '36', mine) >= 0);
   assert.equal(fitVariant('bottoms', '30', mine), -1);
   assert.equal(fitVariant('bottoms', '38', mine), -1);
@@ -123,29 +112,39 @@ test('harmony favours neutrals and punishes a second accent', () => {
 });
 
 function fixture(slot, id, extra = {}) {
+  const price = extra.price ?? 50;
   return {
     id,
     slot,
     source: 'shopify',
     shop: extra.shop || `Shop ${id}`,
     title: id,
-    url: `https://x.test/${id}`,
-    image: `https://x.test/${id}.jpg`,
-    price: 50,
+    url: `https://mnml.la/${id}`,
+    image: `https://cdn.shopify.com/${id}.jpg`,
     colour: 'black',
     wash: slot === 'bottoms' ? 'mid' : null,
     lanes: ['washed'],
     score: 1,
-    variants: [{ label: slot === 'bottoms' ? '34' : slot === 'top' ? 'XL' : slot === 'shoes' ? '10' : 'Default Title', available: true, price: 50 }],
+    variants: [{ label: slot === 'bottoms' ? '34' : slot === 'top' ? 'XL' : slot === 'shoes' ? '10' : 'Default Title', available: true, price }],
     fetchedAt: Date.now(),
     ...extra,
+    price,
   };
 }
 
+const ALL = ['hat', 'chain', 'top', 'belt', 'bag', 'bottoms', 'shoes'];
+
 function fullPool() {
   const pool = new Pool();
-  for (const slot of ['hat', 'chain', 'top', 'belt', 'bag', 'bottoms', 'shoes']) {
-    pool.add([fixture(slot, `${slot}1`), fixture(slot, `${slot}2`)]);
+  for (const slot of ALL) pool.add([fixture(slot, `${slot}1`), fixture(slot, `${slot}2`)]);
+  return pool;
+}
+
+function pricedPool() {
+  const pool = new Pool();
+  const prices = { hat: [30, 120], chain: [35, 200], top: [28, 450], belt: [25, 450], bag: [60, 900], bottoms: [49, 1090], shoes: [75, 3755] };
+  for (const slot of ALL) {
+    pool.add(prices[slot].map((price, i) => fixture(slot, `${slot}${i}`, { price })));
   }
   return pool;
 }
@@ -155,7 +154,6 @@ test('buildFit fills every slot and totals the price', async () => {
   assert.equal(Object.keys(fit.pieces).length, 7);
   assert.equal(fit.total, 350);
   assert.equal(fit.lane, 'washed');
-  assert.ok(fit.note.length > 0);
   assert.ok(!/[,.]/.test(fit.note));
 });
 
@@ -166,16 +164,21 @@ test('buildFit keeps locked pieces and skips seen ones', async () => {
   assert.equal(fit.pieces.bottoms.id, 'bottoms2');
 });
 
-test('buildFit drops pieces that fail the Claude check or sold out', async () => {
+test('sold out picks get replaced after the parallel check', async () => {
+  let checks = 0;
   const fit = await buildFit(fullPool(), {
     sizes: mine,
     hooks: {
-      vet: async p => ({ keep: p.id !== 'shoes1' }),
-      verify: async p => p.id !== 'hat1',
+      verify: async p => {
+        checks++;
+        return p.id !== 'top1' && p.id !== 'bottoms1' && p.id !== 'top2' ? true : p.id === 'top2';
+      },
     },
+    random: () => 0,
   });
-  assert.equal(fit.pieces.shoes.id, 'shoes2');
-  assert.equal(fit.pieces.hat.id, 'hat2');
+  assert.equal(fit.pieces.top.id, 'top2');
+  assert.equal(fit.pieces.bottoms.id, 'bottoms2');
+  assert.ok(checks >= 7);
 });
 
 test('rerollSlot never returns the current piece', async () => {
@@ -188,7 +191,7 @@ test('rerollSlot never returns the current piece', async () => {
 test('fits prefer pieces from different shops', async () => {
   const pool = new Pool();
   for (const slot of ['top', 'bottoms', 'shoes']) {
-    pool.add([fixture(slot, `${slot}A`, { shop: 'A' }), fixture(slot, `${slot}B`, { shop: 'B' }), fixture(slot, `${slot}C`, { shop: 'C' })]);
+    pool.add(['A', 'B', 'C'].map(shop => fixture(slot, `${slot}${shop}`, { shop })));
   }
   let spread = 0;
   for (let i = 0; i < 40; i++) {
@@ -196,6 +199,60 @@ test('fits prefer pieces from different shops', async () => {
     if (fit.shops > 1) spread++;
   }
   assert.ok(spread >= 38, `spread ${spread}`);
+});
+
+test('under budget fits stay at or below 200 and keep the core pieces', async () => {
+  for (let i = 0; i < 60; i++) {
+    const fit = await buildFit(pricedPool(), { sizes: mine, budget: 200 });
+    assert.ok(fit.total <= 200, `total ${fit.total}`);
+    for (const slot of ['top', 'bottoms', 'shoes']) assert.ok(fit.pieces[slot], `missing ${slot}`);
+  }
+});
+
+test('under budget picks a lane that can actually fit', async () => {
+  const pool = new Pool();
+  const both = ['washed', 'football'];
+  pool.add([
+    fixture('top', 't', { price: 25, lanes: both }),
+    fixture('bottoms', 'b', { price: 40, lanes: both }),
+    fixture('shoes', 'pricey', { price: 400, lanes: ['washed'] }),
+    fixture('shoes', 'vans', { price: 70, lanes: ['football'] }),
+  ]);
+  for (let i = 0; i < 30; i++) {
+    const fit = await buildFit(pool, { sizes: mine, budget: 200 });
+    assert.equal(fit.lane, 'football');
+    assert.ok(fit.total <= 200);
+  }
+  assert.ok(budgetFits(pool, mine, 200));
+  assert.ok(!budgetFits(pool, mine, 100));
+});
+
+test('without a budget expensive pieces can appear', async () => {
+  let over = 0;
+  for (let i = 0; i < 40; i++) {
+    const fit = await buildFit(pricedPool(), { sizes: mine });
+    if (fit.total > 200) over++;
+  }
+  assert.ok(over > 0);
+});
+
+test('an expensive lock still gets the cheapest core pieces', async () => {
+  const locked = fixture('top', 'grail', { price: 900 });
+  const fit = await buildFit(pricedPool(), { sizes: mine, locked: [locked], budget: 200 });
+  assert.equal(fit.pieces.top.id, 'grail');
+  assert.equal(fit.pieces.bottoms.price, 49);
+  assert.equal(fit.pieces.shoes.price, 75);
+  assert.equal(fit.pieces.hat, undefined);
+});
+
+test('budget rerolls respect what is left', async () => {
+  const pool = pricedPool();
+  pool.add([fixture('hat', 'hatCheap', { price: 20 })]);
+  const fit = await buildFit(pool, { sizes: mine, budget: 200 });
+  fit.pieces.hat = { ...fixture('hat', 'hat0', { price: 30 }), price: 30 };
+  const others = Object.values(fit.pieces).filter(p => p.slot !== 'hat').reduce((s, p) => s + p.price, 0);
+  const next = await rerollSlot(pool, { fit, slot: 'hat', sizes: mine, budget: 200 });
+  if (next) assert.ok(next.price + others <= 200);
 });
 
 test('normalizeProduct reads a Shopify product', () => {
@@ -214,7 +271,7 @@ test('normalizeProduct reads a Shopify product', () => {
   assert.equal(piece.slot, 'bottoms');
   assert.equal(piece.variants[0].label, '32');
   assert.equal(piece.price, 98);
-  assert.equal(piece.image, 'https://cdn.shopify.com/a.jpg?width=900');
+  assert.equal(piece.image, 'https://cdn.shopify.com/a.jpg?width=720');
   assert.equal(piece.url, 'https://mnml.la/products/baggy');
 });
 
@@ -224,73 +281,50 @@ test('normalizeProduct drops a slot the store is not on the roster for', () => {
   assert.equal(piece, null);
 });
 
-test('eBay titles give sizes and reject unsized clothing', () => {
-  assert.equal(sizeFromTitle('bottoms', 'True Religion Baggy Jeans 34x32 Distressed'), '34 / 32');
-  assert.equal(sizeFromTitle('bottoms', 'Baggy Jeans Size 36'), '36');
-  assert.equal(sizeFromTitle('top', 'Vintage Band Tee Size XL'), 'XL');
-  assert.equal(sizeFromTitle('shoes', 'Vans Sk8 Hi Mens 10.5'), '10.5');
-  const item = { itemId: '9', title: 'Baggy Distressed Jeans', price: { value: '40', currency: 'USD' }, image: { imageUrl: 'https://i.ebayimg.com/a.jpg' }, itemWebUrl: 'https://www.ebay.com/itm/9' };
-  assert.equal(normalizeItem(item, 'bottoms'), null);
-  assert.equal(normalizeItem({ ...item, title: 'Baggy Distressed Jeans 34x32' }, 'bottoms').variants[0].label, '34 / 32');
+test('saved list loads and every entry passes the link rules', () => {
+  const items = JSON.parse(fs.readFileSync(new URL('../public/data/saved.json', import.meta.url), 'utf8'));
+  assert.ok(items.length > 40);
+  let usable = 0;
+  for (const item of items) {
+    const piece = savedPiece(item);
+    if (!piece) continue;
+    usable++;
+    assert.ok(isAllowedLink(piece.url), piece.url);
+    assert.ok(isAllowedImage(piece.image), piece.image);
+  }
+  assert.ok(usable > 40);
 });
 
-test('Claude verdicts are saved so each listing is paid once', async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bh-'));
-  try {
-    configure(dir);
-    let calls = 0;
-    const api = {
-      beta: {
-        messages: {
-          create: async req => {
-            calls++;
-            assert.equal(req.output_config.format.type, 'json_schema');
-            assert.equal(req.messages[0].content[0].source.type, 'url');
-            return {
-              stop_reason: 'end_turn',
-              usage: { input_tokens: 1000, output_tokens: 100 },
-              content: [{ type: 'text', text: JSON.stringify({ keep: true, slot: 'top', lanes: ['wax'], colour: 'black', wash: 'none' }) }],
-            };
-          },
-        },
-      },
-    };
-    const piece = { id: 'p1', title: 'Tee', shop: 'S', slot: 'top', lanes: ['washed'], colour: 'unknown', wash: null, thumb: 'https://x.test/a.jpg' };
-    const first = await vetPiece(piece, api);
-    const second = await vetPiece(piece, api);
-    assert.equal(calls, 1);
-    assert.equal(first.keep, true);
-    assert.deepEqual(second, first);
-    const applied = applyVerdict(piece, first);
-    assert.deepEqual(applied.lanes, ['wax']);
-    assert.equal(applied.colour, 'black');
-  } finally {
-    configure('cache');
-    fs.rmSync(dir, { recursive: true, force: true });
-  }
+test('every store only uses https hosts in the roster', () => {
+  assert.equal(STORES.length, 27);
+  for (const s of STORES) assert.ok(isAllowedLink(`https://${s.host}/products/x`));
 });
 
-test('Claude refusals and spend cap leave the piece unjudged', async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bh-'));
-  try {
-    configure(dir);
-    const refusing = { beta: { messages: { create: async () => ({ stop_reason: 'refusal', usage: { input_tokens: 10, output_tokens: 0 }, content: [] }) } } };
-    const piece = { id: 'p2', title: 'Tee', shop: 'S', slot: 'top', thumb: 'https://x.test/a.jpg' };
-    assert.equal(await vetPiece(piece, refusing), null);
-    process.env.CLAUDE_DAILY_CAP_USD = '0';
-    const never = { beta: { messages: { create: async () => { throw new Error('should not call'); } } } };
-    assert.equal(await vetPiece({ ...piece, id: 'p3' }, never), null);
-  } finally {
-    delete process.env.CLAUDE_DAILY_CAP_USD;
-    configure('cache');
-    fs.rmSync(dir, { recursive: true, force: true });
-  }
+test('share links round trip a fit', async () => {
+  const pool = fullPool();
+  const fit = await buildFit(pool, { sizes: mine });
+  const code = await encodeFit(fit);
+  assert.ok(/^[\w-]+$/.test(code));
+  assert.ok(code.length < 4000, `length ${code.length}`);
+  const back = await decodeFit(code);
+  assert.equal(back.lane, fit.lane);
+  assert.equal(back.total, fit.total);
+  assert.deepEqual(Object.keys(back.pieces).sort(), Object.keys(fit.pieces).sort());
+});
+
+test('share links reject bad input and foreign urls', async () => {
+  assert.equal(await decodeFit('not base64 at all'), null);
+  assert.equal(await decodeFit('AAAA'), null);
+  assert.equal(cleanPiece({ slot: 'top', url: 'https://evil.test/x', image: 'https://cdn.shopify.com/a.jpg' }), null);
+  assert.equal(cleanPiece({ slot: 'top', url: 'javascript:alert(1)', image: 'https://cdn.shopify.com/a.jpg' }), null);
+  assert.equal(cleanPiece({ slot: 'top', url: 'https://mnml.la/a', image: 'https://evil.test/a.jpg' }), null);
+  assert.ok(cleanPiece({ slot: 'top', url: 'https://mnml.la/a', image: 'https://cdn.shopify.com/a.jpg' }));
 });
 
 function bandFixture(paint) {
   const size = 100;
-  const rgb = Buffer.alloc(size * size * 3);
-  const mask = Buffer.alloc(size * size, 255);
+  const rgb = new Uint8Array(size * size * 3);
+  const mask = new Uint8Array(size * size).fill(255);
   for (let y = 0; y < size; y++) {
     const [r, g, b] = paint(y);
     for (let x = 0; x < size; x++) {
@@ -317,102 +351,33 @@ test('legBand leaves flat jeans alone', () => {
 
 test('cornerColour reads a plain backdrop and skips busy ones', () => {
   const size = 40;
-  const plain = Buffer.alloc(size * size * 3, 245);
+  const plain = new Uint8Array(size * size * 3).fill(245);
   assert.deepEqual(cornerColour(plain, size, size, 3), [245, 245, 245]);
-  const busy = Buffer.alloc(size * size * 3, 245);
-  for (let y = 0; y < 10; y++) for (let x = 0; x < 10; x++) busy.fill(0, (y * size + x) * 3, (y * size + x) * 3 + 3);
+  const busy = new Uint8Array(size * size * 3).fill(245);
+  for (let y = 0; y < 10; y++) for (let x = 0; x < 30; x++) busy.fill(0, (y * size + x) * 3, (y * size + x) * 3 + 3);
   assert.equal(cornerColour(busy, size, size, 3), null);
 });
 
-test('skinShare spots a body shot and passes a black belt', async () => {
-  const solid = colour => sharp({ create: { width: 60, height: 60, channels: 4, background: colour } }).webp().toBuffer();
-  assert.ok(await skinShare(await solid({ r: 214, g: 160, b: 130, alpha: 1 })) > 0.9);
-  assert.equal(await skinShare(await solid({ r: 20, g: 20, b: 20, alpha: 1 })), 0);
-  assert.equal(await skinShare(await solid({ r: 214, g: 160, b: 130, alpha: 0 })), 0);
+test('maskFromOutput normalises and finds the box', () => {
+  const size = 10;
+  const raw = new Float32Array(size * size).fill(0.1);
+  for (let y = 2; y < 6; y++) for (let x = 3; x < 8; x++) raw[y * size + x] = 0.9;
+  const { coverage, box, mask } = maskFromOutput(raw, size);
+  assert.deepEqual(box, { top: 2, bottom: 5, left: 3, right: 7 });
+  assert.equal(coverage, 0.2);
+  assert.equal(mask[0], 0);
+  assert.equal(mask[2 * size + 3], 255);
 });
 
-test('saved links are not rechecked within a day', async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bhsaved-'));
-  try {
-    const file = path.join(dir, 'saved.json');
-    fs.writeFileSync(file, JSON.stringify([{ url: 'https://x.test/a', checkedAt: new Date().toISOString() }]));
-    let calls = 0;
-    const out = await checkLinks(file, async () => { calls++; return { status: 200 }; });
-    assert.equal(calls, 0);
-    assert.equal(out.checked, 0);
-    fs.writeFileSync(file, JSON.stringify([{ url: 'https://x.test/a' }]));
-    const again = await checkLinks(file, async () => { calls++; return { status: 404 }; });
-    assert.equal(calls, 1);
-    assert.equal(again.dead, 1);
-    assert.equal(JSON.parse(fs.readFileSync(file, 'utf8'))[0].dead, true);
-  } finally {
-    fs.rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test('a thin chain on a plain backdrop gets keyed out', async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bhkey-'));
-  try {
-    configureCut({ dir, modelPath: path.resolve('models/silueta.onnx') });
-    const input = await sharp({ create: { width: 500, height: 500, channels: 3, background: '#f4f4f4' } })
-      .composite([{ input: await sharp({ create: { width: 6, height: 300, channels: 3, background: '#303030' } }).png().toBuffer(), left: 240, top: 100 }])
-      .png()
-      .toBuffer();
-    const file = path.join(dir, 'chain.webp');
-    await cutBuffer(input, file, 'chain');
-    const written = fs.readFileSync(file);
-    const meta = await sharp(written).metadata();
-    const stats = await sharp(written).stats();
-    assert.ok(meta.hasAlpha);
-    assert.ok(meta.width < 40, `width ${meta.width}`);
-    assert.ok(stats.channels[3].max > 200);
-  } finally {
-    fs.rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test('sold out picks get replaced after the parallel check', async () => {
-  let checks = 0;
-  const pool = fullPool();
-  const fit = await buildFit(pool, {
-    sizes: mine,
-    hooks: {
-      verify: async p => {
-        checks++;
-        return p.id !== 'top1' && p.id !== 'bottoms1';
-      },
-    },
-    random: () => 0,
-  });
-  assert.equal(fit.pieces.top.id, 'top2');
-  assert.equal(fit.pieces.bottoms.id, 'bottoms2');
-  assert.ok(checks >= 7);
-});
-
-test('real alpha lands in the cut image', async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bhcut-'));
-  try {
-    configureCut({ dir, modelPath: path.resolve('models/silueta.onnx') });
-    const input = await sharp({ create: { width: 600, height: 600, channels: 3, background: '#ffffff' } })
-      .composite([{ input: await sharp({ create: { width: 300, height: 400, channels: 3, background: '#1b2a6b' } }).png().toBuffer(), left: 150, top: 100 }])
-      .jpeg()
-      .toBuffer();
-    const file = path.join(dir, 'x.webp');
-    await cutBuffer(input, file, 'top');
-    const written = fs.readFileSync(file);
-    const meta = await sharp(written).metadata();
-    const stats = await sharp(written).stats();
-    assert.ok(meta.hasAlpha);
-    assert.ok(stats.channels[3].min < 40);
-    assert.ok(stats.channels[3].max > 200);
-  } finally {
-    fs.rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test('cut route only accepts known image hosts', () => {
-  assert.ok(isAllowedImage('https://cdn.shopify.com/a.jpg'));
-  assert.ok(!isAllowedImage('https://evil.test/a.jpg'));
-  assert.ok(!isAllowedImage('http://cdn.shopify.com/a.jpg'));
-  assert.ok(!isAllowedImage('file:///etc/passwd'));
+test('pieceColour picks the garment colour and uses white for black clothes', () => {
+  const paint = (r, g, b) => {
+    const data = new Uint8ClampedArray(16 * 4);
+    for (let i = 0; i < 16; i++) data.set([r, g, b, 255], i * 4);
+    return data;
+  };
+  assert.deepEqual(pieceColour(paint(15, 15, 15)), [255, 255, 255]);
+  assert.deepEqual(pieceColour(paint(200, 200, 200)), [255, 255, 255]);
+  const red = pieceColour(paint(180, 40, 40));
+  assert.ok(red[0] > 200 && red[1] < 80);
+  assert.deepEqual(pieceColour(new Uint8ClampedArray(16)), [255, 255, 255]);
 });

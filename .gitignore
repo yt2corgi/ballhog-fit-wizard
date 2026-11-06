@@ -1,4 +1,5 @@
 node_modules
-cache
-models
+/cache
+/models
+/data
 .env

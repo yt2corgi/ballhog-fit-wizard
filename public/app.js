@@ -1,3 +1,8 @@
+import { forget, generate as buildFit, reroll as rerollPiece } from './lib/engine.js';
+import { cutImage } from './lib/cutter.js';
+import { decodeFit, encodeFit } from './lib/share.js';
+import { pieceColour } from './lib/pixels.js';
+
 const ORDER = ['hat', 'chain', 'top', 'belt', 'bag', 'bottoms', 'shoes'];
 const WIDE = new Set(['top', 'bottoms', 'shoes']);
 const SLOT_NAME = { hat: 'Hat', chain: 'Chain', top: 'Top', belt: 'Belt', bag: 'Bag', bottoms: 'Bottoms', shoes: 'Shoes' };
@@ -5,6 +10,9 @@ const WAISTS = Array.from({ length: 19 }, (_, i) => 26 + i);
 const TOPS = ['XS', 'S', 'M', 'L', 'XL', 'XXL'];
 const SHOES = Array.from({ length: 17 }, (_, i) => 6 + i * 0.5);
 const REDUCED = matchMedia('(prefers-reduced-motion: reduce)').matches;
+const BUDGET = 200;
+const GRAIL = 500;
+const WHITE = [255, 255, 255];
 
 const ICONS = {
   lock: '<rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/>',
@@ -69,49 +77,35 @@ function money(n) {
   return `$${Number.isInteger(value) ? value : value.toFixed(2)}`;
 }
 
-function cutUrl(piece) {
-  return `/cut?slot=${piece.slot}&src=${encodeURIComponent(piece.image)}`;
-}
-
-async function post(url, body) {
-  const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-  if (!res.ok) throw new Error(String(res.status));
-  return res.json();
-}
-
 const state = {
   sizes: read('bh.sizes', null),
   saved: read('bh.saved', []),
+  under: read('bh.under', false),
   fit: null,
   locks: new Set(),
   seen: [],
   busy: false,
   reel: {},
-  pending: null,
+  touched: false,
 };
 
 const cards = {};
-const toneCache = new Map();
 
-function toneOf(img) {
-  try {
-    const canvas = document.createElement('canvas');
-    canvas.width = 16;
-    canvas.height = 16;
-    const ctx = canvas.getContext('2d', { willReadFrequently: true });
-    ctx.drawImage(img, 0, 0, 16, 16);
-    const { data } = ctx.getImageData(0, 0, 16, 16);
-    let sum = 0;
-    let count = 0;
-    for (let i = 0; i < data.length; i += 4) {
-      if (data[i + 3] < 128) continue;
-      sum += 0.2126 * data[i] + 0.7152 * data[i + 1] + 0.0722 * data[i + 2];
-      count++;
-    }
-    return count ? sum / count / 255 : 0.5;
-  } catch {
-    return 0.5;
+function sample(img) {
+  const canvas = document.createElement('canvas');
+  canvas.width = 24;
+  canvas.height = 24;
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  ctx.drawImage(img, 0, 0, 24, 24);
+  const { data } = ctx.getImageData(0, 0, 24, 24);
+  let sum = 0;
+  let count = 0;
+  for (let i = 0; i < data.length; i += 4) {
+    if (data[i + 3] < 128) continue;
+    sum += 0.2126 * data[i] + 0.7152 * data[i + 1] + 0.0722 * data[i + 2];
+    count++;
   }
+  return { luma: count ? sum / count / 255 : 0.5, colour: pieceColour(data) };
 }
 
 function tileColour(luma) {
@@ -129,23 +123,45 @@ function loadImage(src) {
   });
 }
 
+function rawResult(piece) {
+  return loadImage(piece.image)
+    .then(() => ({ src: piece.image, photo: true, luma: 0.5, colour: WHITE }))
+    .catch(() => ({ failed: true }));
+}
+
+async function settle(slot, piece) {
+  let current = piece;
+  for (let tries = 0; tries < 3; tries++) {
+    const ready = await prepare(current);
+    if (!ready.failed) {
+      state.fit.pieces[slot] = current;
+      return { piece: current, ready };
+    }
+    forget(current.id);
+    state.seen.push(current.id);
+    delete state.fit.pieces[slot];
+    current = await rerollPiece({ sizes: state.sizes, fit: state.fit, slot, seen: state.seen, budget: budgetNow() }).catch(() => null);
+    if (!current) return null;
+  }
+  return null;
+}
+
 async function prepare(piece) {
-  const cut = cutUrl(piece);
+  if (piece.source === 'saved') return rawResult(piece);
   try {
-    const img = await Promise.race([loadImage(cut), wait(20000).then(() => { throw new Error('slow'); })]);
-    const luma = toneOf(img);
-    toneCache.set(piece.id, luma);
-    return { src: cut, photo: false, luma };
+    const src = await Promise.race([
+      cutImage(piece.image, piece.slot),
+      wait(15000).then(() => { throw new Error('slow'); }),
+    ]);
+    const img = await loadImage(src);
+    return { src, photo: false, ...sample(img) };
   } catch {
-    try {
-      await loadImage(piece.image);
-    } catch {}
-    return { src: piece.image, photo: true, luma: 0.5 };
+    return rawResult(piece);
   }
 }
 
-function frame(src, photo) {
-  const node = el('div', photo ? 'frame photo' : 'frame');
+function frame(src, photo, slot) {
+  const node = el('div', photo ? `frame photo ${slot || ''}` : 'frame');
   const img = el('img');
   img.alt = '';
   img.draggable = false;
@@ -163,6 +179,13 @@ function fillers(slot, count) {
   return out;
 }
 
+function remember(slot, ready) {
+  if (ready.photo) return;
+  const list = state.reel[slot] || (state.reel[slot] = []);
+  if (!list.includes(ready.src)) list.unshift(ready.src);
+  if (list.length > 12) list.length = 12;
+}
+
 function buildCard(slot) {
   const card = el('article', `card${WIDE.has(slot) ? ' wide' : ''}`);
   card.dataset.slot = slot;
@@ -171,6 +194,8 @@ function buildCard(slot) {
   tile.setAttribute('role', 'button');
   tile.setAttribute('aria-label', SLOT_NAME[slot]);
   const reel = el('div', 'reel');
+  const flash = el('div', 'flash');
+  const sweep = el('div', 'sweep');
   const actions = el('div', 'tile-actions');
   const lock = el('button', 'mini');
   lock.type = 'button';
@@ -182,7 +207,7 @@ function buildCard(slot) {
   reroll.setAttribute('aria-label', `Reroll ${SLOT_NAME[slot]}`);
   reroll.append(icon('reroll'));
   actions.append(reroll, lock);
-  tile.append(reel, actions);
+  tile.append(reel, flash, sweep, actions);
   const meta = el('div', 'meta');
   const title = el('div', 'meta-title', ' ');
   const line = el('div', 'meta-line');
@@ -190,7 +215,8 @@ function buildCard(slot) {
   const info = el('span', '', ' ');
   line.append(price, info);
   meta.append(title, line);
-  card.append(tile, meta);
+  const fx = el('div', 'fx');
+  card.append(tile, meta, fx);
   tile.addEventListener('click', () => {
     const piece = state.fit?.pieces[slot];
     if (piece && card.classList.contains('landed')) openPiece(piece);
@@ -209,7 +235,7 @@ function buildCard(slot) {
     e.stopPropagation();
     rerollOne(slot);
   });
-  cards[slot] = { card, tile, reel, title, price, info, lock, anim: null };
+  cards[slot] = { card, tile, reel, flash, sweep, fx, title, price, info, lock, anim: null };
   return card;
 }
 
@@ -217,6 +243,9 @@ function buildStack() {
   const stack = $('stack');
   if (stack.childElementCount) return;
   for (const slot of ORDER) stack.append(buildCard(slot));
+  const mark = () => { state.touched = true; };
+  stack.addEventListener('pointerdown', mark, { passive: true });
+  stack.addEventListener('wheel', mark, { passive: true });
 }
 
 function fillMeta(slot, piece) {
@@ -247,6 +276,44 @@ function spin(slot) {
   );
 }
 
+function burst(slot, colour, big) {
+  const c = cards[slot];
+  const css = `rgb(${colour.join(' ')})`;
+  c.flash.style.setProperty('--fx', css);
+  c.flash.animate(
+    [{ opacity: big ? 0.6 : 0.36 }, { opacity: 0 }],
+    { duration: big ? 460 : 320, easing: 'cubic-bezier(0.25, 0.85, 0.3, 1)' },
+  );
+  c.tile.animate(
+    [
+      { transform: 'translateY(0) scale(1)' },
+      { transform: `translateY(${big ? 7 : 4}px) scale(${big ? 0.975 : 0.985})`, offset: 0.3 },
+      { transform: 'translateY(0) scale(1)' },
+    ],
+    { duration: big ? 340 : 260, easing: 'cubic-bezier(0.25, 0.85, 0.3, 1)' },
+  );
+  const count = big ? 16 : 8;
+  const rect = c.tile.getBoundingClientRect();
+  const reach = Math.min(rect.width, rect.height) * (big ? 0.62 : 0.42);
+  for (let i = 0; i < count; i++) {
+    const spark = el('span', 'spark');
+    spark.style.background = css;
+    const angle = (i / count) * Math.PI * 2 + Math.random() * 0.5;
+    const distance = reach * (0.6 + Math.random() * 0.6);
+    const size = (big ? 4 : 3) + Math.random() * 2;
+    spark.style.width = `${size}px`;
+    spark.style.height = `${size}px`;
+    c.fx.append(spark);
+    spark.animate(
+      [
+        { transform: 'translate(-50%, -50%)', opacity: 0.9 },
+        { transform: `translate(calc(-50% + ${Math.cos(angle) * distance}px), calc(-50% + ${Math.sin(angle) * distance}px)) scale(0.3)`, opacity: 0 },
+      ],
+      { duration: big ? 560 : 420, easing: 'cubic-bezier(0.25, 0.85, 0.3, 1)' },
+    ).onfinish = () => spark.remove();
+  }
+}
+
 async function land(slot, piece, ready) {
   const c = cards[slot];
   c.anim?.cancel();
@@ -254,7 +321,7 @@ async function land(slot, piece, ready) {
   const before = fillers(slot, 5);
   const strip = el('div', 'strip');
   for (const src of before) strip.append(frame(src));
-  strip.append(frame(ready.src, ready.photo));
+  strip.append(frame(ready.src, ready.photo, slot));
   c.reel.replaceChildren(strip);
   c.tile.style.setProperty('--tile', tileColour(ready.luma));
   c.card.classList.remove('spinning');
@@ -262,14 +329,16 @@ async function land(slot, piece, ready) {
   if (!REDUCED) {
     c.anim = strip.animate(
       [{ transform: 'translateY(0)' }, { transform: `translateY(${-h * before.length}px)` }],
-      { duration: 620, easing: 'cubic-bezier(0.18, 0.82, 0.26, 1.03)', fill: 'forwards' },
+      { duration: 620, easing: 'cubic-bezier(0.18, 0.82, 0.26, 1)', fill: 'forwards' },
     );
     await c.anim.finished.catch(() => {});
     c.anim.cancel();
   }
-  c.reel.replaceChildren(frame(ready.src, ready.photo));
+  c.reel.replaceChildren(frame(ready.src, ready.photo, slot));
   c.anim = null;
   c.card.classList.add('landed');
+  remember(slot, ready);
+  if (!REDUCED) burst(slot, ready.colour, piece.price >= GRAIL);
 }
 
 function vanish(slot) {
@@ -293,12 +362,57 @@ function setHead(fit) {
   $('note').textContent = fit.note;
 }
 
-function updateTotal() {
+function fitTotal() {
   const pieces = state.fit ? Object.values(state.fit.pieces) : [];
-  const total = pieces.reduce((sum, p) => sum + (Number(p.price) || 0), 0);
-  $('total').textContent = pieces.length ? money(Math.round(total * 100) / 100) : '$0';
-  if (state.fit) state.fit.total = Math.round(total * 100) / 100;
+  return Math.round(pieces.reduce((sum, p) => sum + (Number(p.price) || 0), 0) * 100) / 100;
+}
+
+function updateTotal() {
+  const total = fitTotal();
+  $('total').textContent = money(total);
+  if (state.fit) state.fit.total = total;
   updateSaveButton();
+}
+
+function countUp(total) {
+  if (REDUCED) {
+    $('total').textContent = money(total);
+    return;
+  }
+  const start = performance.now();
+  const step = now => {
+    const t = Math.min(1, (now - start) / 620);
+    const eased = 1 - (1 - t) ** 3;
+    $('total').textContent = t < 1 ? `$${Math.round(total * eased)}` : money(total);
+    if (t < 1) requestAnimationFrame(step);
+  };
+  requestAnimationFrame(step);
+}
+
+function finale() {
+  const total = fitTotal();
+  if (state.fit) state.fit.total = total;
+  updateSaveButton();
+  countUp(total);
+  if (REDUCED) return;
+  const first = cards[ORDER[0]].tile.getBoundingClientRect().left;
+  for (const slot of ORDER) {
+    const c = cards[slot];
+    if (c.card.classList.contains('gone')) continue;
+    const rect = c.tile.getBoundingClientRect();
+    c.sweep.animate(
+      [{ transform: 'translateX(-120%)', opacity: 0.2 }, { transform: 'translateX(120%)', opacity: 0.2 }],
+      { duration: 460, delay: Math.max(0, rect.left - first) * 0.28, easing: 'cubic-bezier(0.25, 0.85, 0.3, 1)' },
+    );
+  }
+}
+
+function follow(slot) {
+  if (REDUCED || state.touched) return;
+  const stack = $('stack');
+  if (stack.scrollWidth <= stack.clientWidth + 4) return;
+  const c = cards[slot];
+  stack.scrollTo({ left: c.card.offsetLeft - 16 - stack.offsetLeft, behavior: 'smooth' });
 }
 
 function setBusy(on) {
@@ -315,16 +429,13 @@ function showFitView() {
   buildStack();
 }
 
-function remember(fit) {
+function rememberSeen(fit) {
   for (const p of Object.values(fit.pieces)) state.seen.push(p.id);
   if (state.seen.length > 200) state.seen = state.seen.slice(-200);
 }
 
-async function refreshReel() {
-  try {
-    const res = await fetch('/api/reel');
-    if (res.ok) state.reel = await res.json();
-  } catch {}
+function budgetNow() {
+  return state.under ? BUDGET : null;
 }
 
 async function generate() {
@@ -335,44 +446,50 @@ async function generate() {
   }
   setBusy(true);
   showFitView();
-  if (location.pathname !== '/') history.replaceState(null, '', '/');
+  if (location.hash) history.replaceState(null, '', location.pathname);
   const lockedSlots = ORDER.filter(s => state.locks.has(s) && state.fit?.pieces[s]);
   const locked = lockedSlots.map(s => state.fit.pieces[s]);
   const spinning = ORDER.filter(s => !lockedSlots.includes(s));
   setHead(null);
   $('total').textContent = ' ';
+  state.touched = false;
+  const stack = $('stack');
+  if (stack.scrollLeft && !REDUCED) stack.scrollTo({ left: 0, behavior: 'smooth' });
   for (const slot of spinning) spin(slot);
   const started = performance.now();
   let fit;
   try {
-    fit = await post('/api/fit', { sizes: state.sizes, locked, seen: state.seen });
+    fit = await buildFit({ sizes: state.sizes, locked, seen: state.seen, budget: budgetNow() });
   } catch {
     await settleAfterError(spinning);
     showToast('Could not reach the shops · Try again');
     setBusy(false);
     return;
   }
-  const preparing = Object.fromEntries(spinning.filter(s => fit.pieces[s]).map(s => [s, prepare(fit.pieces[s])]));
+  state.fit = fit;
+  rememberSeen(fit);
+  const preparing = Object.fromEntries(spinning.filter(s => fit.pieces[s]).map(s => [s, settle(s, fit.pieces[s])]));
   const elapsed = performance.now() - started;
   if (elapsed < 900) await wait(900 - elapsed);
-  state.fit = fit;
-  remember(fit);
   setHead(fit);
   const landings = [];
   for (const slot of spinning) {
-    const piece = fit.pieces[slot];
-    if (!piece) {
+    const result = preparing[slot] ? await preparing[slot] : null;
+    if (!result) {
       vanish(slot);
       continue;
     }
-    const ready = await preparing[slot];
-    landings.push(land(slot, piece, ready));
-    if (!REDUCED) await wait(170);
+    follow(slot);
+    landings.push(land(slot, result.piece, result.ready));
+    if (!REDUCED) await wait(220);
   }
-  updateTotal();
   await Promise.all(landings);
+  if (!state.touched && stack.scrollLeft && !REDUCED) stack.scrollTo({ left: 0, behavior: 'smooth' });
+  finale();
+  if (state.under && fitTotal() > BUDGET) {
+    showToast(locked.length ? 'Locked pieces put this over $200' : 'Nothing cheaper in your size right now');
+  }
   setBusy(false);
-  refreshReel();
 }
 
 async function settleAfterError(slots) {
@@ -381,7 +498,8 @@ async function settleAfterError(slots) {
     const piece = pieces[slot];
     if (piece) {
       const ready = await prepare(piece);
-      land(slot, piece, ready);
+      if (ready.failed) vanish(slot);
+      else land(slot, piece, ready);
     } else {
       vanish(slot);
     }
@@ -405,23 +523,29 @@ async function rerollOne(slot) {
   let piece = null;
   const started = performance.now();
   try {
-    const out = await post('/api/reroll', { sizes: state.sizes, fit: state.fit, slot, seen: state.seen });
-    piece = out.piece;
+    piece = await rerollPiece({ sizes: state.sizes, fit: state.fit, slot, seen: state.seen, budget: budgetNow() });
   } catch {}
-  const target = piece || current;
-  const ready = await prepare(target);
+  let target = current;
+  let ready = null;
+  if (piece) {
+    state.seen.push(piece.id);
+    const settled = await settle(slot, piece);
+    if (settled) {
+      target = settled.piece;
+      ready = settled.ready;
+    }
+  }
+  if (!ready) {
+    state.fit.pieces[slot] = current;
+    showToast(state.under ? 'Nothing else fits the budget right now' : 'Nothing else in your size right now');
+    ready = await prepare(current);
+  }
   const elapsed = performance.now() - started;
   if (elapsed < 600) await wait(600 - elapsed);
-  if (piece) {
-    state.fit.pieces[slot] = piece;
-    state.seen.push(piece.id);
-  } else {
-    showToast('Nothing else in your size right now');
-  }
-  await land(slot, target, ready);
+  if (ready.failed) vanish(slot);
+  else await land(slot, target, ready);
   updateTotal();
   setBusy(false);
-  refreshReel();
 }
 
 function toggleLock(slot) {
@@ -466,20 +590,31 @@ function toggleSave() {
 async function shareFit() {
   if (!state.fit || state.busy) return;
   try {
-    const out = await post('/api/share', { fit: state.fit });
-    const link = `${location.origin}${out.url}`;
+    const code = await encodeFit(state.fit);
+    const link = `${location.origin}${location.pathname}#f=${code}`;
     try {
       await navigator.clipboard.writeText(link);
       showToast('Link copied');
     } catch {
-      showToast(link);
+      history.replaceState(null, '', `#f=${code}`);
+      showToast('Copy the address bar to share');
     }
   } catch {
     showToast('Could not make a link · Try again');
   }
 }
 
-async function showStatic(fit) {
+function updateUnder() {
+  for (const id of ['under', 'underIdle']) $(id).setAttribute('aria-pressed', String(state.under));
+}
+
+function toggleUnder() {
+  state.under = !state.under;
+  write('bh.under', state.under);
+  updateUnder();
+}
+
+function showStatic(fit) {
   state.fit = fit;
   state.locks.clear();
   showFitView();
@@ -498,11 +633,16 @@ async function showStatic(fit) {
     c.reel.replaceChildren(frame(shape(slot)));
     prepare(piece).then(ready => {
       if (state.fit !== fit) return;
-      c.reel.replaceChildren(frame(ready.src, ready.photo));
+      if (ready.failed) {
+        vanish(slot);
+        return;
+      }
+      c.reel.replaceChildren(frame(ready.src, ready.photo, slot));
       c.tile.style.setProperty('--tile', tileColour(ready.luma));
       c.card.classList.remove('spinning');
       c.card.classList.add('landed');
       fillMeta(slot, piece);
+      remember(slot, ready);
     });
   }
   updateTotal();
@@ -526,8 +666,7 @@ function openSheet(content, label, onClose) {
     requestAnimationFrame(() => {
       $('scrim').classList.add('open');
       sheet.classList.add('open');
-      const first = body.querySelector('button, a');
-      first?.focus({ preventScroll: true });
+      body.querySelector('button, a')?.focus({ preventScroll: true });
     });
   });
 }
@@ -647,7 +786,7 @@ function openSaved() {
         const img = el('img');
         img.alt = '';
         img.loading = 'lazy';
-        img.src = cutUrl(piece);
+        img.src = piece.image;
         thumbs.append(img);
       }
       const text = el('div', 'saved-text');
@@ -726,6 +865,8 @@ async function boot() {
   $('again').addEventListener('click', generate);
   $('save').addEventListener('click', toggleSave);
   $('share').addEventListener('click', shareFit);
+  $('under').addEventListener('click', toggleUnder);
+  $('underIdle').addEventListener('click', toggleUnder);
   $('sizesBtn').addEventListener('click', () => openSizes(false));
   $('savedBtn').addEventListener('click', openSaved);
   $('scrim').addEventListener('click', closeSheet);
@@ -735,16 +876,15 @@ async function boot() {
   wireDrag();
   updateSizesChip();
   updateSaveButton();
-  refreshReel();
-  const shared = location.pathname.match(/^\/f\/([\w-]+)$/);
+  updateUnder();
+  const shared = location.hash.match(/^#f=([\w-]+)$/);
   if (shared) {
-    try {
-      const res = await fetch(`/api/share/${shared[1]}`);
-      if (!res.ok) throw new Error('missing');
-      showStatic(await res.json());
-    } catch {
-      history.replaceState(null, '', '/');
-      showToast('That fit link has expired');
+    const fit = await decodeFit(shared[1]);
+    if (fit) {
+      showStatic(fit);
+    } else {
+      history.replaceState(null, '', location.pathname);
+      showToast('That fit link could not be read');
     }
   }
 }

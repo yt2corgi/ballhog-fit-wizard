@@ -1,6 +1,6 @@
 @font-face {
   font-family: 'Figtree';
-  src: url('/fonts/figtree-latin-wght-normal.woff2') format('woff2-variations');
+  src: url('fonts/figtree-latin-wght-normal.woff2') format('woff2-variations');
   font-weight: 300 900;
   font-display: swap;
 }
@@ -30,6 +30,7 @@
   --move: 400ms;
   --ease: cubic-bezier(0.25, 0.85, 0.3, 1);
   --column: 480px;
+  --row: 1480px;
 }
 
 * {
@@ -193,9 +194,9 @@ p {
 
 .fit {
   width: 100%;
-  max-width: var(--column);
+  max-width: var(--row);
   margin: 0 auto;
-  padding: 8px 16px 184px;
+  padding: 8px 24px 112px;
 }
 
 .fit-head {
@@ -231,17 +232,18 @@ p {
 }
 
 .stack {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 16px 8px;
+  display: flex;
+  gap: 8px;
 }
 
 .card {
+  position: relative;
+  flex: 1 1 0;
   min-width: 0;
 }
 
 .card.wide {
-  grid-column: 1 / -1;
+  flex: 1.7 1 0;
 }
 
 .card.gone {
@@ -256,20 +258,12 @@ p {
   border-radius: var(--r-lg);
   background: var(--tile, var(--s2));
   transition: background var(--move) var(--ease);
-  aspect-ratio: 1 / 1;
+  height: clamp(260px, 54dvh, 600px);
   cursor: pointer;
 }
 
 .card.spinning .tile {
   cursor: default;
-}
-
-.card[data-slot='bottoms'] .tile {
-  aspect-ratio: 4 / 5;
-}
-
-.card[data-slot='shoes'] .tile {
-  aspect-ratio: 3 / 2;
 }
 
 .reel {
@@ -308,7 +302,70 @@ p {
 .frame.photo img {
   width: 100%;
   height: 100%;
+  max-width: none;
+  max-height: none;
   object-fit: cover;
+}
+
+.frame.photo.bottoms img {
+  object-position: center 85%;
+}
+
+.flash {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  pointer-events: none;
+  background: radial-gradient(circle at 50% 50%, var(--fx, #ffffff), transparent 72%);
+}
+
+.sweep {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 100%;
+  opacity: 0;
+  pointer-events: none;
+  background: linear-gradient(100deg, transparent 20%, #ffffff 50%, transparent 80%);
+}
+
+.fx {
+  position: absolute;
+  left: 50%;
+  top: 30%;
+  width: 0;
+  height: 0;
+  pointer-events: none;
+  z-index: 2;
+}
+
+.spark {
+  position: absolute;
+  left: 0;
+  top: 0;
+  border-radius: 50%;
+}
+
+.under {
+  height: 44px;
+  padding: 0 16px;
+  border-radius: var(--r-pill);
+  background: var(--s3);
+  color: var(--text);
+  font-size: var(--t-14);
+  font-weight: 600;
+  white-space: nowrap;
+  transition: background var(--state) var(--ease), color var(--state) var(--ease);
+}
+
+.under:hover {
+  background: var(--s4);
+}
+
+.under[aria-pressed='true'] {
+  background: var(--text);
+  color: #000000;
 }
 
 .card.spinning .strip {
@@ -364,16 +421,19 @@ p {
 
 .meta {
   padding: 8px 4px 0;
-  min-height: 52px;
+  min-height: 64px;
   transition: opacity var(--state) var(--ease);
 }
 
 .meta-title {
   font-size: var(--t-14);
   font-weight: 600;
-  white-space: nowrap;
+  line-height: 1.25;
+  min-height: 2.5em;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
   overflow: hidden;
-  text-overflow: ellipsis;
 }
 
 .meta-line {
@@ -407,8 +467,9 @@ p {
 }
 
 .card.spinning .meta-title {
-  width: 72%;
-  height: 16px;
+  width: 80%;
+  min-height: 0;
+  height: 32px;
   margin-bottom: 4px;
 }
 
@@ -433,9 +494,9 @@ p {
   gap: 8px 16px;
   align-items: center;
   width: 100%;
-  max-width: var(--column);
+  max-width: var(--row);
   margin: 0 auto;
-  padding: 12px 16px;
+  padding: 12px 24px;
 }
 
 .total span {
@@ -706,21 +767,55 @@ p {
   white-space: nowrap;
 }
 
-@media (min-width: 720px) {
+@media (min-width: 900px) {
   .dock-in {
     grid-template-columns: auto auto 1fr;
   }
 
   .dock .cta {
     grid-column: auto;
-  }
-
-  .fit {
-    padding-bottom: 112px;
+    justify-self: end;
+    width: 280px;
   }
 
   .toast {
     bottom: 96px;
+  }
+}
+
+@media (max-width: 899px) {
+  .fit {
+    padding: 8px 16px 176px;
+  }
+
+  .dock-in {
+    padding: 12px 16px;
+  }
+
+  .stack {
+    margin: -24px -16px;
+    padding: 24px 16px;
+    overflow-x: auto;
+    scroll-snap-type: x proximity;
+    scroll-padding-left: 16px;
+    scrollbar-width: none;
+  }
+
+  .stack::-webkit-scrollbar {
+    display: none;
+  }
+
+  .card {
+    flex: 0 0 34vw;
+    scroll-snap-align: start;
+  }
+
+  .card.wide {
+    flex: 0 0 52vw;
+  }
+
+  .tile {
+    height: clamp(280px, 52dvh, 520px);
   }
 }
 

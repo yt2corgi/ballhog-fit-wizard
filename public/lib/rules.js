@@ -42,7 +42,7 @@ export const LANES = {
 };
 
 const REJECT = /\b(women'?s?|woman|wmns|ladies|girls?|kids?|youth|toddler|infants?|baby|maternity|dress|skirt|bikini|bralette|leggings|gift ?card|towels?|candle|sticker|poster|mug|keychain|key ?ring|lanyard|socks?|underwear|boxers?|swim|shorts|jorts|slides?|sandals?|mules?|clogs?|sunglasses|eyewear|wallet|phone case|airpods?|skateboard|deck|incense|ashtray|tray|blanket|pillow|book|magazine|vinyl|lighter|umbrella|laces|insoles?|cleaner|protector|sample|tank|crop|cropped|bodysuit|corset|romper|compression|diaper)\b/;
-const NOVELTY = /\b(minecraft|disney|star wars|pok[eé]mon|hello kitty|peanuts|barbie|persona|spongebob|marvel|realtree|sanrio|nintendo|magic: the gathering|comb and scissors|designed by)\b/;
+const NOVELTY = /\b(x king ice|sonic|street fighter|minecraft|disney|star wars|pok[eé]mon|hello kitty|peanuts|barbie|persona|spongebob|marvel|realtree|sanrio|nintendo|magic: the gathering|comb and scissors|designed by)\b/;
 const JNCO_LEG = /(\d{2})\s*["”]/;
 const FAST_FASHION =/\b(shein|temu|romwe|zaful|cider|boohoo|prettylittlething|fashion ?nova|emmiol|dhgate|aliexpress)\b/;
 const KID_SHOE = /\b(gs|ps|td|grade[- ]school|pre-?school|little kid|big kid)\b/;

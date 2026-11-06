@@ -37,6 +37,17 @@ export const IMAGE_HOSTS = [
   ...STORES.map(s => `www.${s.host}`),
 ];
 
+const LINK_HOSTS = ['www.asos.com', 'www.pacsun.com', 'www.ebay.com', ...STORES.map(s => s.host), ...STORES.map(s => `www.${s.host}`)];
+
+export function isAllowedLink(href) {
+  try {
+    const u = new URL(href);
+    return u.protocol === 'https:' && LINK_HOSTS.includes(u.hostname);
+  } catch {
+    return false;
+  }
+}
+
 export function isAllowedImage(src) {
   try {
     const u = new URL(src);

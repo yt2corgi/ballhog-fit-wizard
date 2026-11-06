@@ -6,13 +6,13 @@
 <meta name="theme-color" content="#000000">
 <meta name="description" content="Generate a Ballhog fit from real clothing across many shops">
 <title>Ballhog Fit Wizard</title>
-<link rel="icon" href="/mark.svg" type="image/svg+xml">
-<link rel="stylesheet" href="/style.css">
+<link rel="icon" href="mark.svg" type="image/svg+xml">
+<link rel="stylesheet" href="style.css">
 </head>
 <body>
 <header class="bar">
   <button id="sizesBtn" class="chip" type="button" hidden></button>
-  <a id="brand" class="brand" href="/" hidden>
+  <a id="brand" class="brand" href="./" hidden>
     <svg class="mark" viewBox="0 0 32 32" aria-hidden="true"><path d="M12.5 10.5 16 7l3.5 3.5"/><path d="M9 18l7-6.2 7 6.2"/><path d="M5.5 25.5 16 16.8l10.5 8.7"/></svg>
     <span>Ballhog Fit Wizard</span>
   </a>
@@ -24,6 +24,7 @@
     <svg class="mark big" viewBox="0 0 32 32" aria-hidden="true"><path d="M12.5 10.5 16 7l3.5 3.5"/><path d="M9 18l7-6.2 7 6.2"/><path d="M5.5 25.5 16 16.8l10.5 8.7"/></svg>
     <h1>Ballhog Fit Wizard</h1>
     <button id="generate" class="cta" type="button">Generate a fit</button>
+    <button id="underIdle" class="under" type="button" aria-pressed="false">Under $200</button>
   </section>
 
   <section id="fit" class="fit" hidden>
@@ -42,6 +43,7 @@
       <strong id="total"></strong>
     </div>
     <div class="dock-actions">
+      <button id="under" class="under" type="button" aria-pressed="false">Under $200</button>
       <button id="save" class="round" type="button" aria-label="Save fit" aria-pressed="false"></button>
       <button id="share" class="round" type="button" aria-label="Copy share link"></button>
     </div>
@@ -56,6 +58,6 @@
 </aside>
 <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
 
-<script type="module" src="/app.js"></script>
+<script type="module" src="app.js"></script>
 </body>
 </html>

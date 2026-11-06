@@ -2,56 +2,42 @@
 
 Press one button and get a full Ballhog fit made from real clothing across many shops.
 
-## Run it
+Live at https://yt2corgi.github.io/ballhog-fit-wizard/
+
+## How it works
+
+The site is fully static and runs in the visitor's browser, with no server and no keys.
+
+- Listings come live from the public product feeds of the stores in `public/lib/stores.js`, and the chosen size gets a stock check before a piece is shown
+- `public/data/saved.json` adds a small fixed list of PacSun pieces, shown as regular photos
+- `public/lib/rules.js` tags each listing by slot, lane, colour and wash, and rejects slim cuts, womenswear, novelty collabs and ultra fast fashion
+- `public/lib/generator.js` picks a lane and fills each slot by size match, colour harmony and shop variety, and keeps the Under $200 option within budget
+- `public/lib/cut-worker.js` removes photo backgrounds in a web worker with the U2-Net small model and caches each result in the browser
+
+Sizes and saved fits stay on the visitor's device. Share links carry the whole fit in the address.
+
+## Run it locally
 
 ```
-npm install
-npm run setup
 npm start
 ```
 
-Then open http://localhost:6260. `npm run setup` downloads the free background removal model once.
-
-## Optional keys
-
-Copy `.env.example` to `.env` and restart. The site works without any keys.
-
-| Key | What it switches on |
-| --- | --- |
-| `EBAY_CLIENT_ID` and `EBAY_CLIENT_SECRET` | Live eBay resale search. Free at developer.ebay.com |
-| `ANTHROPIC_API_KEY` | Claude checks each listing photo and saves the verdict so a listing is only paid for once |
-| `CLAUDE_MODEL` | Defaults to `claude-opus-5-5`. `claude-haiku-5-5` is much cheaper |
-| `CLAUDE_DAILY_CAP_USD` | Daily spend limit. Defaults to 2. Past it the site uses keywords only |
-
-## Where pieces come from
-
-- Live on every click: the Shopify stores in `server/stores.js`, plus eBay once keyed. Final picks get a live stock check for the chosen size
-- Saved list: `data/saved.json`, currently ASOS and PacSun. `npm run seed` rebuilds it. Dead links are checked once a day and dropped
-
-To add a hand-picked piece from a shop that blocks automated requests, add an entry to `data/saved.json`:
-
-```json
-{
-  "shop": "Grailed",
-  "brand": "True Religion",
-  "title": "Baggy distressed jeans",
-  "price": 120,
-  "url": "https://www.grailed.com/listings/...",
-  "image": "https://...",
-  "condition": "Pre-owned"
-}
-```
-
-The image host also has to be listed in `IMAGE_HOSTS` in `server/stores.js`.
-
-## How a fit gets built
-
-1. `server/rules.js` tags every listing by slot, lane, colour and wash from its text, and rejects slim cuts, womenswear, novelty collabs and ultra fast fashion
-2. `server/generator.js` picks a lane, then fills each slot by scoring size match, colour harmony and shop variety
-3. `server/cutout.js` removes photo backgrounds once per image and caches them in `cache/cut`
+Then open http://localhost:6260/ballhog-fit-wizard/
 
 ## Tests
 
 ```
 npm test
 ```
+
+## Deploying
+
+Every push to `main` runs the tests and publishes `public/` to GitHub Pages.
+
+## History
+
+The first commit holds an earlier version with a Node backend, eBay search and a Claude photo check. Those need private keys, so they can't run on a static site.
+
+## Credits
+
+Background removal uses [U-2-Net](https://github.com/xuebinqin/U-2-Net) (Apache 2.0) through [ONNX Runtime Web](https://github.com/microsoft/onnxruntime) (MIT). Product names, photos and prices belong to their shops, and every piece links back to its listing.

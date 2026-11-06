@@ -51,7 +51,44 @@ function publicPiece(piece, variant) {
   };
 }
 
-function ranked(pool, slot, lane, mine, chosen, avoid, random) {
+const BUDGET_SHARE = { bottoms: 0.25, shoes: 0.4, top: 0.15 };
+
+function spentOn(pieces) {
+  return pieces.reduce((sum, p) => sum + (Number(p.price) || 0), 0);
+}
+
+function cheapest(pool, slot, lane, mine, avoid) {
+  let low = Infinity;
+  for (const piece of pool.list(slot)) {
+    if (!piece.lanes.includes(lane) || avoid.has(piece.id)) continue;
+    const variant = pickVariant(piece, mine);
+    if (!variant) continue;
+    const price = variant.price || piece.price;
+    if (price < low) low = price;
+  }
+  return low;
+}
+
+export function allowance(pool, slot, lane, mine, pieces, avoid, budget) {
+  if (!budget) return Infinity;
+  const left = budget - spentOn(Object.values(pieces));
+  const low = cheapest(pool, slot, lane, mine, avoid);
+  if (!REQUIRED.includes(slot)) {
+    let reserved = 0;
+    for (const other of REQUIRED) if (!pieces[other]) reserved += Math.min(cheapest(pool, other, lane, mine, avoid), budget);
+    return left - reserved;
+  }
+  let reserved = 0;
+  for (const other of REQUIRED) {
+    if (other === slot || pieces[other]) continue;
+    const price = cheapest(pool, other, lane, mine, avoid);
+    if (price !== Infinity) reserved += price;
+  }
+  const room = Math.min(left - reserved, Math.max(budget * BUDGET_SHARE[slot], low));
+  return Math.max(room, low);
+}
+
+function ranked(pool, slot, lane, mine, chosen, avoid, random, maxPrice = Infinity) {
   const usedShops = new Map();
   for (const p of chosen) usedShops.set(p.shop, (usedShops.get(p.shop) || 0) + 1);
   const shopLuck = new Map();
@@ -61,19 +98,21 @@ function ranked(pool, slot, lane, mine, chosen, avoid, random) {
     if (avoid.has(piece.id)) continue;
     const variant = pickVariant(piece, mine);
     if (!variant) continue;
+    if ((variant.price || piece.price) > maxPrice) continue;
     if (!shopLuck.has(piece.shop)) shopLuck.set(piece.shop, random() * 8);
     let score = (piece.score || 0) + (piece.weight || 0) + variant.score + harmony(piece, chosen);
     score -= (usedShops.get(piece.shop) || 0) * 3;
     if (lane === 'football' && slot === 'bag' && piece.backpack) score += 3;
     score += shopLuck.get(piece.shop) + random() * 3;
+    if (maxPrice !== Infinity && maxPrice > 0) score -= ((variant.price || piece.price) / maxPrice) * 5;
     out.push({ piece, variant, score });
   }
   out.sort((a, b) => b.score - a.score);
   return out;
 }
 
-async function pickFor(pool, slot, lane, mine, chosen, avoid, hooks, random) {
-  const list = ranked(pool, slot, lane, mine, chosen, avoid, random);
+async function pickFor(pool, slot, lane, mine, chosen, avoid, hooks, random, maxPrice) {
+  const list = ranked(pool, slot, lane, mine, chosen, avoid, random, maxPrice);
   for (const entry of list.slice(0, 4)) {
     if (hooks.vet) {
       const verdict = await hooks.vet(entry.piece);
@@ -107,7 +146,21 @@ export function laneCounts(pool, mine) {
   return counts;
 }
 
-function chooseLane(locked, pool, mine, random) {
+function coreCost(pool, lane, mine, locked, avoid) {
+  let cost = spentOn(locked);
+  for (const slot of REQUIRED) {
+    if (locked.some(p => p.slot === slot)) continue;
+    cost += cheapest(pool, slot, lane, mine, avoid);
+  }
+  return cost;
+}
+
+export function budgetFits(pool, mine, budget, locked = [], seen = []) {
+  const avoid = new Set(seen);
+  return Object.keys(LANES).some(lane => coreCost(pool, lane, mine, locked, avoid) <= budget);
+}
+
+function chooseLane(locked, pool, mine, random, budget, avoid) {
   let options = Object.keys(LANES);
   for (const piece of locked) {
     const narrowed = options.filter(l => piece.lanes?.includes(l));
@@ -116,6 +169,12 @@ function chooseLane(locked, pool, mine, random) {
   const counts = laneCounts(pool, mine);
   const usable = options.filter(l => REQUIRED.every(s => counts[l][s] > 0 || locked.some(p => p.slot === s)));
   const from = usable.length ? usable : options;
+  if (budget) {
+    const costs = from.map(lane => [lane, coreCost(pool, lane, mine, locked, avoid)]);
+    const fits = costs.filter(([, cost]) => cost <= budget).map(([lane]) => lane);
+    if (fits.length) return fits[Math.floor(random() * fits.length)];
+    return costs.sort((a, b) => a[1] - b[1])[0][0];
+  }
   return from[Math.floor(random() * from.length)];
 }
 
@@ -135,14 +194,15 @@ function summarize(lane, pieces, random) {
   };
 }
 
-export async function buildFit(pool, { sizes, locked = [], seen = [], hooks = {}, random = Math.random }) {
-  const lane = chooseLane(locked, pool, sizes, random);
+export async function buildFit(pool, { sizes, locked = [], seen = [], hooks = {}, random = Math.random, budget = null }) {
+  const avoid = new Set(seen);
+  const lane = chooseLane(locked, pool, sizes, random, budget, avoid);
   const pieces = {};
   for (const piece of locked) pieces[piece.slot] = piece;
-  const avoid = new Set(seen);
   const picks = {};
   const fill = async slot => {
-    const pick = await pickFor(pool, slot, lane, sizes, Object.values(pieces), avoid, hooks, random);
+    const maxPrice = allowance(pool, slot, lane, sizes, pieces, avoid, budget);
+    const pick = await pickFor(pool, slot, lane, sizes, Object.values(pieces), avoid, hooks, random, maxPrice);
     if (pick) {
       picks[slot] = pick;
       pieces[slot] = pick.out;
@@ -165,13 +225,14 @@ export async function buildFit(pool, { sizes, locked = [], seen = [], hooks = {}
   return summarize(lane, pieces, random);
 }
 
-export async function rerollSlot(pool, { fit, slot, sizes, seen = [], hooks = {}, random = Math.random }) {
+export async function rerollSlot(pool, { fit, slot, sizes, seen = [], hooks = {}, random = Math.random, budget = null }) {
   const others = Object.values(fit.pieces).filter(p => p.slot !== slot);
   const current = fit.pieces[slot];
   const avoid = new Set(seen);
   if (current) avoid.add(current.id);
   for (let round = 0; round < 4; round++) {
-    const pick = await pickFor(pool, slot, fit.lane, sizes, others, avoid, hooks, random);
+    const maxPrice = budget ? budget - spentOn(others) : Infinity;
+    const pick = await pickFor(pool, slot, fit.lane, sizes, others, avoid, hooks, random, maxPrice);
     if (!pick) return null;
     const live = hooks.verify ? await hooks.verify(pick.piece, pick.label) : true;
     if (live) return pick.out;
